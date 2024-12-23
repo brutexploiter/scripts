@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebSocket Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            color: #333;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .container {
+            width: 700px;
+            background: #ffffff;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            text-align: center;
+            color: #4caf50;
+            margin-bottom: 20px;
+        }
+
+        label {
+            font-size: 14px;
+            margin: 10px 0 5px 0;
+            display: block;
+        }
+
+        input, button {
+            width: 100%;
+            margin-bottom: 15px;
+            padding: 12px;
+            font-size: 16px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        input:focus {
+            outline: 2px solid #4caf50;
+        }
+
+        button {
+            cursor: pointer;
+            background: #4caf50;
+            color: white;
+            font-weight: bold;
+            border: none;
+            transition: background 0.3s ease;
+        }
+
+        button:hover {
+            background: #45a049;
+        }
+
+        button:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+        }
+
+        .row button {
+            width: 48%;
+        }
+
+        #log {
+            background: #f9f9f9;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            margin-top: 10px;
+            height: 200px;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+
+        .small-note {
+            font-size: 12px;
+            color: #666;
+            margin-top: -10px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WebSocket Client</h1>
+        <!-- Host and Endpoint Configuration -->
+        <label for="hostInput">WebSocket Host:</label>
+        <input type="text" id="hostInput" placeholder="e.g., example.com" required>
+        <small class="small-note">Host is required</small>
+
+        <label for="portInput">Port (optional):</label>
+        <input type="number" id="portInput" placeholder="e.g., 443 (default)" min="1" max="65535">
+
+        <label for="endpointInput">Endpoint (optional):</label>
+        <input type="text" id="endpointInput" placeholder="e.g., endpoint">
+        <small class="small-note">If omitted, connects directly to host</small>
+
+        <!-- Control Buttons -->
+        <div class="row">
+            <button id="connectBtn" onclick="connectWebSocket()">Connect</button>
+            <button id="disconnectBtn" onclick="disconnectWebSocket()" disabled>Disconnect</button>
+        </div>
+
+        <!-- Message Sending -->
+        <label for="userInput">Message:</label>
+        <input type="text" id="userInput" placeholder="Type your message here">
+        <button id="sendMessageBtn" onclick="sendUserInput()" disabled>Send Message</button>
+
+        <!-- Logs -->
+        <label for="log">Request/Response Logs:</label>
+        <div id="log">Logs will appear here...</div>
+    </div>
+
+    <script>
+        let socket;
+
+        function sanitizeInput(input) {
+            const div = document.createElement('div');
+            div.appendChild(document.createTextNode(input));
+            return div.innerHTML;
+        }
+
+        function getWebSocketUrl() {
+            const host = sanitizeInput(document.getElementById('hostInput').value);
+            const port = document.getElementById('portInput').value || '';
+            let endpoint = sanitizeInput(document.getElementById('endpointInput').value || '');
+
+            // Automatically prepend '/' if endpoint is present
+            if (endpoint && !endpoint.startsWith('/')) {
+                endpoint = '/' + endpoint;
+            }
+
+            if (!host) {
+                logMessage('Error: Host is required!', 'error');
+                return null;
+            }
+
+            // If port is specified, include it
+            return port ? `ws://${host}:${port}${endpoint}` : `ws://${host}${endpoint}`;
+        }
+
+        function logMessage(message, type = 'info') {
+            const logArea = document.getElementById('log');
+            const timestamp = new Date().toLocaleTimeString();
+            logArea.textContent += `[${timestamp}] ${type.toUpperCase()}: ${message}\n`;
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        function connectWebSocket() {
+            const url = getWebSocketUrl();
+            if (!url) return;
+
+            logMessage(`Attempting connection to ${url}...`);
+
+            try {
+                socket = new WebSocket(url);
+
+                socket.onopen = () => {
+                    logMessage('Connection successful');
+                    document.getElementById('disconnectBtn').disabled = false;
+                    document.getElementById('sendMessageBtn').disabled = false;
+                };
+
+                socket.onmessage = (event) => {
+                    logMessage(`Server: ${event.data}`);
+                };
+
+                socket.onerror = (error) => {
+                    logMessage(`Error: ${error.message}`, 'error');
+                };
+
+                socket.onclose = () => {
+                    logMessage('Disconnected!');
+                    document.getElementById('disconnectBtn').disabled = true;
+                    document.getElementById('sendMessageBtn').disabled = true;
+                };
+            } catch (error) {
+                logMessage(`Error: Unable to connect (${error.message})`, 'error');
+            }
+        }
+
+        function disconnectWebSocket() {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.close();
+                logMessage('Connection closed by client');
+            } else {
+                logMessage('WebSocket is not connected.', 'error');
+            }
+        }
+
+        function sendUserInput() {
+            const message = sanitizeInput(document.getElementById('userInput').value);
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                logMessage(`Client: ${message}`);
+                socket.send(message);
+            } else {
+                logMessage('Error: Cannot send message, WebSocket is not open.', 'error');
+            }
+        }
+    </script>
+</body>
+</html>
