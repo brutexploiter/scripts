@@ -1,0 +1,82 @@
+#!/bin/bash
+
+# hex2dec - Convert hexadecimal to decimal with flexible input
+
+HELP_MSG="
+Usage: hex2dec [INPUT/RANGE] [OPTIONS]
+Convert hexadecimal numbers to decimal.
+
+Options:
+  -r, --range    Convert a range (e.g., 3fb5cc-3fb5f6)
+  -m, --multiple Convert multiple comma-separated hex values
+  -o FILE        Save output to file
+  -h, --help     Show this help message
+"
+
+# Initialize variables
+output_file=""
+
+# Parse arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -r|--range) mode="range"; shift; range="$1" ;;
+        -m|--multiple) mode="multiple"; shift; list="$1" ;;
+        -o) shift; output_file="$1" ;;
+        -h|--help) echo "$HELP_MSG"; exit 0 ;;
+        *)
+            if [[ -z "$mode" ]] && [[ "$1" =~ ^[0-9a-fA-F]+(-[0-9a-fA-F]+)?$ ]]; then
+                mode="auto"
+                input="$1"
+            elif [[ -z "$mode" ]]; then
+                echo "Error: Invalid input '$1'"
+                exit 1
+            fi
+            ;;
+    esac
+    shift
+done
+
+# Handle output redirection
+exec > >(if [ -n "$output_file" ]; then tee "$output_file"; else cat; fi)
+
+# Conversion function
+convert() {
+    local hex_num="${1#0x}"
+    hex_num=$(tr '[:upper:]' '[:lower:]' <<< "$hex_num")
+    echo "$((16#$hex_num))"
+}
+
+# Process input
+case $mode in
+    "range")
+        IFS='-' read -ra parts <<< "$range"
+        start_hex="${parts[0]}"
+        end_hex="${parts[1]}"
+        start_dec=$(convert "$start_hex")
+        end_dec=$(convert "$end_hex")
+        for ((i=start_dec; i<=end_dec; i++)); do echo "$i"; done
+        ;;
+
+    "multiple")
+        IFS=',' read -ra hex_values <<< "$list"
+        for h in "${hex_values[@]}"; do convert "$h"; done
+        ;;
+
+    "auto")
+        if [[ "$input" == *-* ]]; then
+            IFS='-'; read -ra parts <<< "$input"
+            start_hex="${parts[0]}"
+            end_hex="${parts[1]}"
+            start_dec=$(convert "$start_hex")
+            end_dec=$(convert "$end_hex")
+            for ((i=start_dec; i<=end_dec; i++)); do echo "$i"; done
+        else
+            convert "$input"
+        fi
+        ;;
+
+    *)
+        echo "$HELP_MSG"
+        exit 1
+        ;;
+esac

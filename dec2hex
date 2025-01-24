@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# dec2hex - Convert decimal to hexadecimal with flexible input
+
+HELP_MSG="
+Usage: dec2hex [INPUT/RANGE] [OPTIONS]
+Convert decimal numbers to hexadecimal.
+
+Options:
+  -r, --range    Convert a range (e.g., 4175300-4175350)
+  -m, --multiple Convert multiple comma-separated decimals
+  -u, --uppercase Output hex in uppercase (default: lowercase)
+  -o FILE        Save output to file
+  -h, --help     Show this help message
+"
+
+# Initialize variables
+uppercase=0
+output_file=""
+
+# Parse arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -r|--range) mode="range"; shift; range="$1" ;;
+        -m|--multiple) mode="multiple"; shift; list="$1" ;;
+        -u|--uppercase) uppercase=1 ;;
+        -o) shift; output_file="$1" ;;
+        -h|--help) echo "$HELP_MSG"; exit 0 ;;
+        *)
+            if [[ -z "$mode" ]] && [[ "$1" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+                mode="auto"
+                input="$1"
+            elif [[ -z "$mode" ]]; then
+                echo "Error: Invalid input '$1'"
+                exit 1
+            fi
+            ;;
+    esac
+    shift
+done
+
+# Handle output redirection
+exec > >(if [ -n "$output_file" ]; then tee "$output_file"; else cat; fi)
+
+# Conversion function
+convert() {
+    if [[ $uppercase -eq 1 ]]; then
+        printf "%X\n" "$1"
+    else
+        printf "%x\n" "$1"
+    fi
+}
+
+# Process input
+case $mode in
+    "range")
+        start=$(cut -d'-' -f1 <<< "$range")
+        end=$(cut -d'-' -f2 <<< "$range")
+        for ((i=start; i<=end; i++)); do convert "$i"; done
+        ;;
+
+    "multiple")
+        IFS=',' read -ra nums <<< "$list"
+        for n in "${nums[@]}"; do convert "$n"; done
+        ;;
+
+    "auto")
+        if [[ "$input" == *-* ]]; then
+            start=$(cut -d'-' -f1 <<< "$input")
+            end=$(cut -d'-' -f2 <<< "$input")
+            for ((i=start; i<=end; i++)); do convert "$i"; done
+        else
+            convert "$input"
+        fi
+        ;;
+
+    *)
+        echo "$HELP_MSG"
+        exit 1
+        ;;
+esac
