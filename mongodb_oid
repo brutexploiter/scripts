@@ -1,0 +1,198 @@
+#!/usr/bin/env ruby
+require 'optparse'
+require 'time'
+
+VERSION = '1.0.0'.freeze
+
+# --- Core Functions ---
+def decode_object_id(object_id)
+  raise 'Invalid ObjectID length' unless object_id.length == 24
+
+  timestamp = object_id[0..7].to_i(16)
+  machine_id = object_id[8..13].to_i(16)
+  process_id = object_id[14..17].to_i(16)
+  counter = object_id[18..23].to_i(16)
+
+  {
+    timestamp: Time.at(timestamp).utc.iso8601,
+    machine_id: machine_id,
+    process_id: process_id,
+    counter: counter
+  }
+end
+
+def encode_object_id(options)
+  raise 'Timestamp out of range' unless options[:time].between?(0, 0xFFFFFFFF)
+  raise 'Machine ID out of range' unless options[:machine].between?(0, 0xFFFFFF)
+  raise 'Process ID out of range' unless options[:process].between?(0, 0xFFFF)
+  raise 'Counter out of range' unless options[:counter].between?(0, 0xFFFFFF)
+
+  [
+    format("%08x", options[:time]),
+    format("%06x", options[:machine]),
+    format("%04x", options[:process]),
+    format("%06x", options[:counter])
+  ].join
+end
+
+# --- Generation Functions ---
+def parse_spec(spec, type, debug)
+  return [] unless spec
+
+  if spec.start_with?('file:')
+    file = spec.sub('file:', '')
+    puts "Reading #{type} values from: #{file}" if debug
+    File.readlines(file).map(&:chomp).map(&:to_i)
+  elsif spec.include?('..')
+    parts = spec.split('..')
+    start = type == :time ? Time.parse(parts[0]).to_i : parts[0].to_i
+    finish = type == :time ? Time.parse(parts[1]).to_i : parts[1].to_i
+    puts "Parsing #{type} range: #{start}..#{finish}" if debug
+    (start..finish).to_a
+  elsif spec.include?(',')
+    values = spec.split(',').map do |part|
+      type == :time ? Time.parse(part).to_i : part.to_i
+    end
+    puts "Parsing #{type} list: #{values.join(', ')}" if debug
+    values
+  else
+    value = type == :time ? Time.parse(spec).to_i : spec.to_i
+    puts "Using single #{type} value: #{value}" if debug
+    [value]
+  end
+end
+
+def generate_object_ids(options, debug, verbose)
+  time_values = parse_spec(options[:time], :time, debug) || []
+  machine_values = parse_spec(options[:machine], :machine, debug) || []
+  process_values = parse_spec(options[:process], :process, debug) || []
+  counter_values = parse_spec(options[:counter], :counter, debug) || []
+
+  valid_ids = []
+  total = time_values.length * machine_values.length * process_values.length * counter_values.length
+  current = 0
+
+  time_values.each do |t|
+    next unless t.between?(0, 0xFFFFFFFF)
+    
+    machine_values.each do |m|
+      next unless m.between?(0, 0xFFFFFF)
+      
+      process_values.each do |p|
+        next unless p.between?(0, 0xFFFF)
+        
+        counter_values.each do |c|
+          next unless c.between?(0, 0xFFFFFF)
+          
+          oid = encode_object_id({ time: t, machine: m, process: p, counter: c })
+          valid_ids << oid
+          puts "Generated: #{oid}" if debug
+          
+          current += 1
+          puts "Progress: #{current}/#{total}" if verbose && (current % 1000 == 0)
+        end
+      end
+    end
+  end
+
+  valid_ids
+end
+
+# --- CLI Parser ---
+begin
+  options = {}
+  global = OptionParser.new do |opts|
+    opts.banner = "Usage: mongodb_oid [OPTIONS] COMMAND [ARGS]"
+    opts.separator "\nCommands:"
+    opts.separator "  decode    Decode an ObjectID into its components"
+    opts.separator "  encode    Create a single ObjectID from components"
+    opts.separator "  generate  Generate multiple ObjectIDs from specifications"
+    opts.separator "\nGlobal Options:"
+    opts.on('-v', '--version', 'Show version') do
+      puts "mongodb_oid v#{VERSION}"
+      exit
+    end
+    opts.on('-h', '--help', 'Show help') do
+      puts opts
+      exit
+    end
+  end
+
+  # Parse global options first
+  global.order!(ARGV)
+
+  command = ARGV.shift
+
+  case command
+  when 'decode'
+    OptionParser.new do |opts|
+      opts.banner = "Usage: decode [OPTIONS] OBJECT_ID"
+      opts.separator "\nOptions:"
+      opts.on('-d', '--debug', 'Show debug information')
+      opts.on('-h', '--help', 'Show help') { puts opts; exit }
+    end.parse!(ARGV)
+    
+    object_id = ARGV.shift
+    raise 'ObjectID required for decode' unless object_id
+    result = decode_object_id(object_id)
+    
+    puts "Timestamp: #{result[:timestamp]}"
+    puts "Machine ID: #{result[:machine_id]}"
+    puts "Process ID: #{result[:process_id]}"
+    puts "Counter:    #{result[:counter]}"
+
+  when 'encode'
+    encode_options = {}
+    OptionParser.new do |opts|
+      opts.banner = "Usage: encode [OPTIONS]"
+      opts.separator "\nOptions:"
+      opts.on('-t', '--time TIME', Integer, 'Unix timestamp (required)')
+      opts.on('-m', '--machine ID', Integer, 'Machine ID (required)')
+      opts.on('-p', '--process ID', Integer, 'Process ID (required)')
+      opts.on('-c', '--counter VAL', Integer, 'Counter value (required)')
+      opts.on('-h', '--help', 'Show help') { puts opts; exit }
+    end.parse!(ARGV, into: encode_options)
+    
+    required = [:time, :machine, :process, :counter]
+    missing = required.select { |key| encode_options[key].nil? }
+    raise "Missing options: #{missing.join(', ')}" unless missing.empty?
+
+    puts encode_object_id(encode_options)
+
+  when 'generate'
+    gen_options = {}
+    OptionParser.new do |opts|
+      opts.banner = "Usage: generate [OPTIONS]"
+      opts.separator "\nOptions:"
+      opts.on('-t', '--time SPEC', 'Time specification (file:, range, or list)')
+      opts.on('-m', '--machine SPEC', 'Machine ID specification (file:, range, or list)')
+      opts.on('-p', '--process SPEC', 'Process ID specification (file:, range, or list)')
+      opts.on('-c', '--counter SPEC', 'Counter specification (file:, range, or list)')
+      opts.on('-o', '--output FILE', 'Output file name')
+      opts.on('-d', '--debug', 'Show generation details')
+      opts.on('-v', '--verbose', 'Show progress updates')
+      opts.on('-h', '--help', 'Show help') { puts opts; exit }
+    end.parse!(ARGV, into: gen_options)
+
+    object_ids = generate_object_ids(gen_options, gen_options[:debug], gen_options[:verbose])
+    
+    if gen_options[:output]
+      File.write(gen_options[:output], object_ids.join("\n"))
+      puts "#{object_ids.count} ObjectIDs generated successfully"
+    else
+      puts object_ids
+    end
+
+  else
+    if command.nil?
+      puts global.help
+      exit
+    else
+      raise "Unknown command: #{command}"
+    end
+  end
+
+rescue => e
+  puts "Error: #{e.message}"
+  exit 1
+end
