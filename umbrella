@@ -1,12 +1,12 @@
 #!/bin/bash
 # Usage:
 #   Single domain mode:
-#     $(basename "$0") -d example.com [-o output.txt] [-R resume_offset] [-c config.yaml] [-t token] [-r rate_limit] [-v]
+#     $(basename "$0") -d example.com [-o output.txt] [-R resume_offset] [-c config.yaml] [-t <token>] [-r rate_limit] [-u user_agent] [-w] [-v]
 #
-#     Example: $(basename "$0") -d example.com -R dashboard.example.com -t <token> -r 3
+#     Example: $(basename "$0") -d example.com -R dashboard.example.com -t <token> -r 12 -u "CustomUserAgent/1.0" -w -v
 #
 #   Multiple domains mode:
-#     $(basename "$0") -l domains.txt [-c config.yaml] [-t token] [-r rate_limit] [-v]
+#     $(basename "$0") -l domains.txt [-c config.yaml] [-t <token>] [-r rate_limit] [-u user_agent] [-w] [-v]
 #     (Results are saved as <domain>.txt for each domain in the list)
 #
 # Options:
@@ -16,12 +16,14 @@
 #   -R, --resume       Resume from a given offset subdomain (must be a subdomain of the provided domain)
 #   -c, --config       Alternative configuration file path (config.yaml)
 #   -t, --token        Direct API token (UUID format) to use instead of a config file or env variable
-#   -r, --rate-limit   Number of seconds to wait between requests (default: 3 seconds)
+#   -r, --rate-limit   Fixed delay (in seconds) after each API call (default: 3 seconds)
+#   -u, --user-agent   Custom User-Agent string to use instead of the default
+#   -w, --web          Enable web mode: include the Origin header "Origin: https://dashboard.umbrella.com"
 #   -v, --verbose      Enable verbose mode: print HTTP request, response, and jq output
 #   -h, --help         Show this help message
 
 # Parse command-line options using GNU getopt
-OPTIONS=$(getopt -o d:o:c:t:l:R:r:vh -l domain:,output:,config:,token:,list:,resume:,rate-limit:,verbose,help -- "$@")
+OPTIONS=$(getopt -o d:o:c:t:l:R:r:u:wvh -l domain:,output:,config:,token:,list:,resume:,rate-limit:,user-agent:,web,verbose,help -- "$@")
 if [ $? -ne 0 ]; then
     echo "Error: Incorrect options provided." >&2
     exit 1
@@ -37,6 +39,11 @@ LIST_FILE=""
 RESUME=""
 VERBOSE=0
 RATE_LIMIT=3
+USER_AGENT=""    # Will be set to default if not provided
+WEB_FLAG=0
+
+# Set default User-Agent
+DEFAULT_USER_AGENT="Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0"
 
 # Process options
 while true; do
@@ -69,6 +76,14 @@ while true; do
             RATE_LIMIT="$2"
             shift 2
             ;;
+        -u|--user-agent)
+            USER_AGENT="$2"
+            shift 2
+            ;;
+        -w|--web)
+            WEB_FLAG=1
+            shift
+            ;;
         -v|--verbose)
             VERBOSE=1
             shift
@@ -76,11 +91,11 @@ while true; do
         -h|--help|-hh)
             echo "Usage:"
             echo "  Single domain mode:"
-            echo "    $(basename "$0") -d example.com [-o output.txt] [-R resume_offset] [-c config.yaml] [-t token] [-r rate_limit] [-v]"
-            echo "    Example: $(basename "$0") -d example.com -R dashboard.example.com -t 6f665f25-8dcf-4968-a5b3-a8y2c0284dbg -r 3"
+            echo "    $(basename "$0") -d example.com [-o output.txt] [-R resume_offset] [-c config.yaml] [-t <token>] [-r rate_limit] [-u user_agent] [-w] [-v]"
+            echo "    Example: $(basename "$0") -d example.com -R dashboard.example.com -t <token> -r 12 -u \"CustomUserAgent/1.0\" -w -v"
             echo ""
             echo "  Multiple domains mode:"
-            echo "    $(basename "$0") -l domains.txt [-c config.yaml] [-t token] [-r rate_limit] [-v]"
+            echo "    $(basename "$0") -l domains.txt [-c config.yaml] [-t <token>] [-r rate_limit] [-u user_agent] [-w] [-v]"
             echo "    (Results are saved as <domain>.txt for each domain in the list)"
             exit 0
             ;;
@@ -116,6 +131,11 @@ if [ -n "$DOMAIN" ] && [ -n "$RESUME" ]; then
         echo "Error: The resume value must be a subdomain of the domain provided." >&2
         exit 1
     fi
+fi
+
+# Set the user agent: if a custom one is provided, use it; otherwise, use the default.
+if [ -z "$USER_AGENT" ]; then
+    USER_AGENT="$DEFAULT_USER_AGENT"
 fi
 
 # Resolve the API token: priority is -t flag, then UMBRELLA_TOKEN env variable, then config file.
@@ -200,18 +220,22 @@ query_domain() {
             URL="https://investigate.api.umbrella.com/subdomains/${d}?limit=${LIMIT}&offsetName=${OFFSET}"
         fi
 
-        if [ "$VERBOSE" -eq 1 ]; then
-            echo "HTTP request: curl -s -L --request GET --url \"$URL\" --header \"Accept: application/json\" --header \"Origin: https://dashboard.umbrella.com\" --header \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0\" --header \"Authorization: Bearer ${TOKEN}\"" >&2
+        # Build the curl command headers
+        # Always include Accept, Authorization, and User-Agent headers.
+        # Include Origin header only if WEB_FLAG is set.
+        CURL_CMD=(curl -s -L --request GET --url "$URL" \
+            --header "Accept: application/json" \
+            --header "User-Agent: ${USER_AGENT}" \
+            --header "Authorization: Bearer ${TOKEN}")
+        if [ "$WEB_FLAG" -eq 1 ]; then
+            CURL_CMD+=(--header "Origin: https://dashboard.umbrella.com")
         fi
 
-        START=$(date +%s)
-        RESPONSE=$(curl -s -L --request GET --url "$URL" \
-            --header "Accept: application/json" \
-            --header "Origin: https://dashboard.umbrella.com" \
-            --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0" \
-            --header "Authorization: Bearer ${TOKEN}")
-        END=$(date +%s)
-        ELAPSED=$(( END - START ))
+        if [ "$VERBOSE" -eq 1 ]; then
+            echo "HTTP request: ${CURL_CMD[*]}" >&2
+        fi
+
+        RESPONSE=$("${CURL_CMD[@]}")
 
         if [ "$VERBOSE" -eq 1 ]; then
             echo "HTTP response: $RESPONSE" >&2
@@ -236,12 +260,7 @@ query_domain() {
         fi
 
         OFFSET=$(echo "$NAMES" | tail -n 1)
-
-        # Enforce the rate limit: sleep for the remaining time if the call took less than RATE_LIMIT seconds.
-        if [ "$ELAPSED" -lt "$RATE_LIMIT" ]; then
-            sleep_time=$(( RATE_LIMIT - ELAPSED ))
-            sleep $sleep_time
-        fi
+        sleep "$RATE_LIMIT"
     done
 }
 
