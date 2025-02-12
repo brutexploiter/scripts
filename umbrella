@@ -1,26 +1,27 @@
 #!/bin/bash
 # Usage:
 #   Single domain mode:
-#     $(basename "$0") -d example.com [-o output.txt] [-r resume_offset] [-c config.yaml] [-t token] [-v]
+#     $(basename "$0") -d example.com [-o output.txt] [-R resume_offset] [-c config.yaml] [-t token] [-r rate_limit] [-v]
 #
-#     Example: $(basename "$0") -d example.com -r dashboard.example.com -t <token>
+#     Example: $(basename "$0") -d example.com -R dashboard.example.com -t <token> -r 3
 #
 #   Multiple domains mode:
-#     $(basename "$0") -l domains.txt [-c config.yaml] [-t token] [-v]
+#     $(basename "$0") -l domains.txt [-c config.yaml] [-t token] [-r rate_limit] [-v]
 #     (Results are saved as <domain>.txt for each domain in the list)
 #
 # Options:
-#   -d, --domain     Domain to query subdomains for (required in single domain mode)
-#   -l, --list       File containing a list of domains (one per line) for multiple domain mode
-#   -o, --output     Output file for a single domain (if omitted, results print to STDOUT)
-#   -r, --resume     Resume from a given offset subdomain (must be a subdomain of the provided domain)
-#   -c, --config     Alternative configuration file path (config.yaml)
-#   -t, --token      Direct API token (UUID format) to use instead of a config file or env variable
-#   -v, --verbose    Enable verbose mode: print HTTP request, response, and jq output
-#   -h, --help       Show this help message
+#   -d, --domain       Domain to query subdomains for (required in single domain mode)
+#   -l, --list         File containing a list of domains (one per line) for multiple domain mode
+#   -o, --output       Output file for a single domain (if omitted, results print to STDOUT)
+#   -R, --resume       Resume from a given offset subdomain (must be a subdomain of the provided domain)
+#   -c, --config       Alternative configuration file path (config.yaml)
+#   -t, --token        Direct API token (UUID format) to use instead of a config file or env variable
+#   -r, --rate-limit   Number of seconds to wait between requests (default: 3 seconds)
+#   -v, --verbose      Enable verbose mode: print HTTP request, response, and jq output
+#   -h, --help         Show this help message
 
 # Parse command-line options using GNU getopt
-OPTIONS=$(getopt -o d:o:c:t:l:r:vh -l domain:,output:,config:,token:,list:,resume:,verbose,help -- "$@")
+OPTIONS=$(getopt -o d:o:c:t:l:R:r:vh -l domain:,output:,config:,token:,list:,resume:,rate-limit:,verbose,help -- "$@")
 if [ $? -ne 0 ]; then
     echo "Error: Incorrect options provided." >&2
     exit 1
@@ -35,6 +36,7 @@ TOKEN=""
 LIST_FILE=""
 RESUME=""
 VERBOSE=0
+RATE_LIMIT=3
 
 # Process options
 while true; do
@@ -59,8 +61,12 @@ while true; do
             LIST_FILE="$2"
             shift 2
             ;;
-        -r|--resume)
+        -R|--resume)
             RESUME="$2"
+            shift 2
+            ;;
+        -r|--rate-limit)
+            RATE_LIMIT="$2"
             shift 2
             ;;
         -v|--verbose)
@@ -70,11 +76,11 @@ while true; do
         -h|--help|-hh)
             echo "Usage:"
             echo "  Single domain mode:"
-            echo "    $(basename "$0") -d example.com [-o output.txt] [-r resume_offset] [-c config.yaml] [-t token] [-v]"
-            echo "    Example: $(basename "$0") -d example.com -r dashboard.example.com -t 6f665f25-8dcf-4968-a5b3-a8y2c0284dbg"
+            echo "    $(basename "$0") -d example.com [-o output.txt] [-R resume_offset] [-c config.yaml] [-t token] [-r rate_limit] [-v]"
+            echo "    Example: $(basename "$0") -d example.com -R dashboard.example.com -t 6f665f25-8dcf-4968-a5b3-a8y2c0284dbg -r 3"
             echo ""
             echo "  Multiple domains mode:"
-            echo "    $(basename "$0") -l domains.txt [-c config.yaml] [-t token] [-v]"
+            echo "    $(basename "$0") -l domains.txt [-c config.yaml] [-t token] [-r rate_limit] [-v]"
             echo "    (Results are saved as <domain>.txt for each domain in the list)"
             exit 0
             ;;
@@ -100,7 +106,7 @@ fi
 
 # In list mode, resume option is not allowed.
 if [ -n "$LIST_FILE" ] && [ -n "$RESUME" ]; then
-    echo "Error: The resume option (-r) works only in single domain mode." >&2
+    echo "Error: The resume option (-R) works only in single domain mode." >&2
     exit 1
 fi
 
@@ -198,11 +204,14 @@ query_domain() {
             echo "HTTP request: curl -s -L --request GET --url \"$URL\" --header \"Accept: application/json\" --header \"Origin: https://dashboard.umbrella.com\" --header \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0\" --header \"Authorization: Bearer ${TOKEN}\"" >&2
         fi
 
+        START=$(date +%s)
         RESPONSE=$(curl -s -L --request GET --url "$URL" \
             --header "Accept: application/json" \
             --header "Origin: https://dashboard.umbrella.com" \
             --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0" \
             --header "Authorization: Bearer ${TOKEN}")
+        END=$(date +%s)
+        ELAPSED=$(( END - START ))
 
         if [ "$VERBOSE" -eq 1 ]; then
             echo "HTTP response: $RESPONSE" >&2
@@ -221,12 +230,18 @@ query_domain() {
             echo "$NAMES"
         fi
 
+        # If the batch has fewer than LIMIT, we're done.
         if [ "$COUNT" -lt "$LIMIT" ]; then
             break
         fi
 
         OFFSET=$(echo "$NAMES" | tail -n 1)
-        sleep 3
+
+        # Enforce the rate limit: sleep for the remaining time if the call took less than RATE_LIMIT seconds.
+        if [ "$ELAPSED" -lt "$RATE_LIMIT" ]; then
+            sleep_time=$(( RATE_LIMIT - ELAPSED ))
+            sleep $sleep_time
+        fi
     done
 }
 
