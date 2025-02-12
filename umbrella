@@ -1,20 +1,26 @@
 #!/bin/bash
 # Usage:
 #   Single domain mode:
-#     umbrella -d domain.com [-o output.txt] [-c config.yaml] [-t token]
+#     $(basename "$0") -d example.com [-o output.txt] [-r resume_offset] [-c config.yaml] [-t token] [-v]
 #
-#   Multiple domains (list) mode:
-#     umbrella -l domains.txt [-c config.yaml] [-t token]
+#     Example: $(basename "$0") -d example.com -r dashboard.example.com -t <token>
 #
-#   In list mode, each domain’s results are saved in a file named <domain>.txt.
+#   Multiple domains mode:
+#     $(basename "$0") -l domains.txt [-c config.yaml] [-t token] [-v]
+#     (Results are saved as <domain>.txt for each domain in the list)
 #
-# The token (UUID format) can be directly supplied with -t/--token.
-# If not, the script checks for the UMBRELLA_TOKEN env variable,
-# or loads it from a config file (searched in the order: -c flag, ./config.yaml,
-# then $HOME/.config/umbrella/config.yaml).
+# Options:
+#   -d, --domain     Domain to query subdomains for (required in single domain mode)
+#   -l, --list       File containing a list of domains (one per line) for multiple domain mode
+#   -o, --output     Output file for a single domain (if omitted, results print to STDOUT)
+#   -r, --resume     Resume from a given offset subdomain (must be a subdomain of the provided domain)
+#   -c, --config     Alternative configuration file path (config.yaml)
+#   -t, --token      Direct API token (UUID format) to use instead of a config file or env variable
+#   -v, --verbose    Enable verbose mode: print HTTP request, response, and jq output
+#   -h, --help       Show this help message
 
 # Parse command-line options using GNU getopt
-OPTIONS=$(getopt -o d:o:c:t:l:h -l domain:,output:,config:,token:,list:,help -- "$@")
+OPTIONS=$(getopt -o d:o:c:t:l:r:vh -l domain:,output:,config:,token:,list:,resume:,verbose,help -- "$@")
 if [ $? -ne 0 ]; then
     echo "Error: Incorrect options provided." >&2
     exit 1
@@ -27,6 +33,8 @@ OUTPUT_FILE=""
 CONFIG_FILE=""
 TOKEN=""
 LIST_FILE=""
+RESUME=""
+VERBOSE=0
 
 # Process options
 while true; do
@@ -51,12 +59,23 @@ while true; do
             LIST_FILE="$2"
             shift 2
             ;;
+        -r|--resume)
+            RESUME="$2"
+            shift 2
+            ;;
+        -v|--verbose)
+            VERBOSE=1
+            shift
+            ;;
         -h|--help|-hh)
             echo "Usage:"
             echo "  Single domain mode:"
-            echo "    $0 -d domain.com [-o output.txt] [-c config.yaml] [-t token]"
+            echo "    $(basename "$0") -d example.com [-o output.txt] [-r resume_offset] [-c config.yaml] [-t token] [-v]"
+            echo "    Example: $(basename "$0") -d example.com -r dashboard.example.com -t 6f665f25-8dcf-4968-a5b3-a8y2c0284dbg"
+            echo ""
             echo "  Multiple domains mode:"
-            echo "    $0 -l domains.txt [-c config.yaml] [-t token]"
+            echo "    $(basename "$0") -l domains.txt [-c config.yaml] [-t token] [-v]"
+            echo "    (Results are saved as <domain>.txt for each domain in the list)"
             exit 0
             ;;
         --)
@@ -69,9 +88,9 @@ while true; do
     esac
 done
 
-# Validate that either a domain or a list is provided (but not both)
+# Validate that either a single domain or a list is provided (not both)
 if [ -n "$DOMAIN" ] && [ -n "$LIST_FILE" ]; then
-    echo "Error: Please specify either a single domain (-d) or a list file (-l), not both." >&2
+    echo "Error: Specify either a single domain (-d) or a list file (-l), not both." >&2
     exit 1
 fi
 if [ -z "$DOMAIN" ] && [ -z "$LIST_FILE" ]; then
@@ -79,12 +98,26 @@ if [ -z "$DOMAIN" ] && [ -z "$LIST_FILE" ]; then
     exit 1
 fi
 
-# Resolve the API token: If not provided via -t, check env variable UMBRELLA_TOKEN, then config file.
+# In list mode, resume option is not allowed.
+if [ -n "$LIST_FILE" ] && [ -n "$RESUME" ]; then
+    echo "Error: The resume option (-r) works only in single domain mode." >&2
+    exit 1
+fi
+
+# If resume is provided in single domain mode, validate that it is a subdomain of DOMAIN.
+if [ -n "$DOMAIN" ] && [ -n "$RESUME" ]; then
+    if [[ "$RESUME" != *."$DOMAIN" ]]; then
+        echo "Error: The resume value must be a subdomain of the domain provided." >&2
+        exit 1
+    fi
+fi
+
+# Resolve the API token: priority is -t flag, then UMBRELLA_TOKEN env variable, then config file.
 if [ -z "$TOKEN" ]; then
     if [ -n "$UMBRELLA_TOKEN" ]; then
         TOKEN="$UMBRELLA_TOKEN"
     else
-        # Determine the config file location
+        # Determine configuration file location
         if [ -n "$CONFIG_FILE" ]; then
             if [ ! -f "$CONFIG_FILE" ]; then
                 echo "Error: Config file not found at $CONFIG_FILE" >&2
@@ -125,15 +158,31 @@ if [ -z "$TOKEN" ]; then
     fi
 fi
 
-# Function to query subdomains for a given domain and output results.
-# Results are written to the output file if specified; otherwise, printed to STDOUT.
+# API query settings
+LIMIT=100
+
+# Set output method: for single domain mode, if -o is provided use that, else STDOUT.
+# In list mode, each domain’s result is saved to a file named <domain>.txt.
+if [ -n "$OUTPUT_FILE" ]; then
+    > "$OUTPUT_FILE"
+    output_method="file"
+else
+    output_method="stdout"
+fi
+
+# Function to query subdomains for a given domain.
 query_domain() {
     local d="$1"
     local out_file="$2"
     local OFFSET=""
     local LIMIT=100
 
-    # If an output file is specified, clear it first.
+    # In single domain mode, if resume is provided, use it as the initial offset.
+    if [ -n "$RESUME" ]; then
+        OFFSET="$RESUME"
+    fi
+
+    # If output file is specified, clear it.
     if [ -n "$out_file" ]; then
         > "$out_file"
     fi
@@ -145,33 +194,43 @@ query_domain() {
             URL="https://investigate.api.umbrella.com/subdomains/${d}?limit=${LIMIT}&offsetName=${OFFSET}"
         fi
 
+        if [ "$VERBOSE" -eq 1 ]; then
+            echo "HTTP request: curl -s -L --request GET --url \"$URL\" --header \"Accept: application/json\" --header \"Origin: https://dashboard.umbrella.com\" --header \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0\" --header \"Authorization: Bearer ${TOKEN}\"" >&2
+        fi
+
         RESPONSE=$(curl -s -L --request GET --url "$URL" \
             --header "Accept: application/json" \
+            --header "Origin: https://dashboard.umbrella.com" \
+            --header "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:135.0) Gecko/20100101 Firefox/135.0" \
             --header "Authorization: Bearer ${TOKEN}")
 
-        # Extract only subdomain names using jq.
+        if [ "$VERBOSE" -eq 1 ]; then
+            echo "HTTP response: $RESPONSE" >&2
+        fi
+
         NAMES=$(echo "$RESPONSE" | jq -r '.[].name')
+        if [ "$VERBOSE" -eq 1 ]; then
+            echo "jq: $NAMES" >&2
+        fi
+
         COUNT=$(echo "$NAMES" | wc -l)
 
-        if [ -n "$out_file" ]; then
+        if [ "$output_method" = "file" ]; then
             echo "$NAMES" >> "$out_file"
         else
             echo "$NAMES"
         fi
 
-        # If fewer than LIMIT results, we've reached the end.
         if [ "$COUNT" -lt "$LIMIT" ]; then
             break
         fi
 
-        # Use the last subdomain as the offset for the next call.
         OFFSET=$(echo "$NAMES" | tail -n 1)
-        sleep 1
+        sleep 3
     done
 }
 
 # Main logic:
-# If list mode is used, iterate over each non-empty, non-comment line in the file.
 if [ -n "$LIST_FILE" ]; then
     if [ ! -f "$LIST_FILE" ]; then
         echo "Error: List file not found at $LIST_FILE" >&2
@@ -179,15 +238,13 @@ if [ -n "$LIST_FILE" ]; then
     fi
     while IFS= read -r line || [ -n "$line" ]; do
         domain_entry=$(echo "$line" | xargs)  # trim whitespace
-        # Skip empty lines or those starting with "#"
+        # Skip empty lines or lines starting with "#"
         if [ -z "$domain_entry" ] || [[ "$domain_entry" == \#* ]]; then
             continue
         fi
-        # For each domain, output is saved as <domain>.txt in the current directory.
         output_file="${domain_entry}.txt"
         query_domain "$domain_entry" "$output_file"
     done < "$LIST_FILE"
 else
-    # Single domain mode. If an output file is provided via -o, use it; otherwise, print to STDOUT.
     query_domain "$DOMAIN" "$OUTPUT_FILE"
 fi
